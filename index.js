@@ -137,3 +137,17 @@ receive 3000 friend kotak misc
 });
 
 console.log("🚀 Expense Bot is running...");
+
+
+const express = require("express");
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("Telegram Expense Bot is running 🚀");
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Server listening on port ${PORT}`);
+});
