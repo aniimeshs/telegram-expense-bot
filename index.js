@@ -1,12 +1,11 @@
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const { google } = require("googleapis");
+const express = require("express");
 
 /* ================== TELEGRAM BOT ================== */
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, {
-  polling: false,
-});
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
 
 /* ================== GOOGLE AUTH ================== */
 
@@ -15,357 +14,206 @@ const auth = new google.auth.GoogleAuth({
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 
-const sheets = google.sheets({
-  version: "v4",
-  auth,
-});
+const sheets = google.sheets({ version: "v4", auth });
 
-/* ================== MESSAGE PARSER ================== */
-
-function parseMessage(text) {
-  const parts = text.trim().split(" ");
-  let flowType = "EXPENSE";
-  let amount, description, account, category, reference = "";
-
-  // ===== SALARY =====
-  if (parts[0] === "salary") {
-    amount = Number(parts[1]);
-    account = parts[2];
-    category = "salary";
-    description = "Salary Credit";
-    flowType = "INCOME";
-
-    return {
-      entries: [{
-        date: new Date().toLocaleString(),
-        amount,
-        flowType,
-        category,
-        account,
-        description,
-        reference: "",
-        raw: text
-      }]
-    };
-  }
-
-  // ===== BORROWED =====
-  if (parts[0] === "borrow") {
-    amount = Number(parts[1]);
-    reference = parts[2];
-    account = parts[3];
-    category = parts[4];
-
-    return {
-      entries: [{
-        date: new Date().toLocaleString(),
-        amount,
-        flowType: "BORROWED",
-        category,
-        account,
-        description: `Borrowed from ${reference}`,
-        reference,
-        raw: text
-      }]
-    };
-  }
-
-  // ===== RECEIVED =====
-  if (parts[0] === "receive") {
-    amount = Number(parts[1]);
-    reference = parts[2];
-    account = parts[3];
-    category = parts[4];
-
-    return {
-      entries: [{
-        date: new Date().toLocaleString(),
-        amount,
-        flowType: "RECEIVED",
-        category,
-        account,
-        description: `Received from ${reference}`,
-        reference,
-        raw: text
-      }]
-    };
-  }
-
-  // ===== TRANSFER =====
-  if (parts[2] === "transfer") {
-    amount = Number(parts[0]);
-    const fromAccount = parts[1];
-    const toAccount = parts[3];
-
-    return {
-      entries: [
-        {
-          date: new Date().toLocaleString(),
-          amount,
-          flowType: "TRANSFER_OUT",
-          category: "transfer",
-          account: fromAccount,
-          description: `Transfer to ${toAccount}`,
-          reference: toAccount,
-          raw: text
-        },
-        {
-          date: new Date().toLocaleString(),
-          amount,
-          flowType: "TRANSFER_IN",
-          category: "transfer",
-          account: toAccount,
-          description: `Transfer from ${fromAccount}`,
-          reference: fromAccount,
-          raw: text
-        }
-      ]
-    };
-  }
-
-  // ===== NORMAL / INVESTMENT =====
-  amount = Number(parts[0]);
-  if (isNaN(amount)) return null;
-
-  account = parts[parts.length - 2];
-  category = parts[parts.length - 1];
-  description = parts.slice(1, -2).join(" ");
-
-  flowType = category === "invest" ? "INVESTMENT" : "EXPENSE";
-
-  return {
-    entries: [{
-      date: new Date().toLocaleString(),
-      amount,
-      flowType,
-      category,
-      account,
-      description,
-      reference: "",
-      raw: text
-    }]
-  };
-}
-
-/* ================== BOT LISTENER ================== */
-
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (!text || !text.startsWith("/")) return;
-
-  try {
-    const rows = await getAllTransactions();
-
-    // /help
-    if (text === "/help") {
-      return bot.sendMessage(
-        chatId,
-        `
-📘 *Expense Bot Commands*
-
-/today → Today's expense
-/month → Monthly summary
-/borrowed → Outstanding borrowed
-/help → Command list
-
-🧾 Log examples:
-250 lunch kotak foodout
-salary 60000 icici income
-borrow 5000 friend sbi misc
-receive 3000 friend kotak misc
-5000 sip icici invest
-        `,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    // /today
-    if (text === "/today") {
-      let total = 0;
-      rows.forEach(([date, amount, flow]) => {
-        if (flow === "EXPENSE" && isSameDay(date)) {
-          total += Number(amount);
-        }
-      });
-
-      return bot.sendMessage(chatId, `📅 Today’s Expense: ₹${total}`);
-    }
-
-    // /month
-    if (text === "/month") {
-      let expense = 0, income = 0, investment = 0;
-
-      rows.forEach(([date, amount, flow]) => {
-        if (!isSameMonth(date)) return;
-        if (flow === "EXPENSE") expense += Number(amount);
-        if (flow === "INCOME") income += Number(amount);
-        if (flow === "INVESTMENT") investment += Number(amount);
-      });
-
-      return bot.sendMessage(
-        chatId,
-        `📊 *This Month*
-Expense: ₹${expense}
-Income: ₹${income}
-Investment: ₹${investment}`,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    // /borrowed
-    if (text === "/borrowed") {
-      let borrowed = 0, received = 0;
-
-      rows.forEach(([, amount, flow]) => {
-        if (flow === "BORROWED") borrowed += Number(amount);
-        if (flow === "RECEIVED") received += Number(amount);
-      });
-
-      const pending = borrowed - received;
-
-      return bot.sendMessage(
-        chatId,
-        `🤝 Borrowed Summary
-Borrowed: ₹${borrowed}
-Received: ₹${received}
-Pending: ₹${pending}`
-      );
-    }
-
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(chatId, "❌ Error processing command");
-  }
-});
-
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (!text || text.startsWith("/")) return;
-
-  const parsed = parseMessage(text);
-  if (!parsed) {
-    bot.sendMessage(chatId, "❌ Invalid format");
-    return;
-  }
-
-  for (const data of parsed.entries) {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.SHEET_ID,
-      range: "Transactions!A:H",
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          data.date,
-          data.amount,
-          data.flowType,
-          data.category,
-          data.account,
-          data.description,
-          data.reference,
-          data.raw
-        ]]
-      }
-    });
-  }
-
-
-  if (!data) {
-    bot.sendMessage(
-      chatId,
-      `❌ Invalid format
-
-Examples:
-250 lunch kotak foodout
-salary 60000 icici income
-borrow 5000 friend sbi misc
-receive 3000 friend kotak misc
-5000 sip icici invest`
-    );
-    return;
-  }
-
-  try {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: process.env.SHEET_ID,
-      range: "Transactions!A:H",
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          data.date,
-          data.amount,
-          data.flowType,
-          data.category,
-          data.account,
-          data.description,
-          data.reference,
-          data.raw,
-        ]],
-      },
-    });
-
-    bot.sendMessage(chatId, `✅ Logged ₹${data.amount}`);
-  } catch (error) {
-    console.error(error);
-    bot.sendMessage(chatId, "❌ Failed to save entry");
-  }
-});
+/* ================== HELPERS ================== */
 
 async function getAllTransactions() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SHEET_ID,
-    range: "Transactions!A2:H", // skip header
+    range: "Transactions!A2:H",
   });
-
   return res.data.values || [];
 }
 
 function isSameDay(dateStr) {
   const d = new Date(dateStr);
-  const today = new Date();
+  const t = new Date();
   return (
-    d.getDate() === today.getDate() &&
-    d.getMonth() === today.getMonth() &&
-    d.getFullYear() === today.getFullYear()
+    d.getDate() === t.getDate() &&
+    d.getMonth() === t.getMonth() &&
+    d.getFullYear() === t.getFullYear()
   );
 }
 
 function isSameMonth(dateStr) {
   const d = new Date(dateStr);
-  const now = new Date();
-  return (
-    d.getMonth() === now.getMonth() &&
-    d.getFullYear() === now.getFullYear()
-  );
+  const t = new Date();
+  return d.getMonth() === t.getMonth() && d.getFullYear() === t.getFullYear();
 }
 
-async function startBot() {
-  try {
-    await bot.stopPolling(); // safety
-    await bot.startPolling();
-    console.log("🤖 Telegram polling started safely");
-  } catch (err) {
-    console.error("Polling start error:", err.message);
+/* ================== MESSAGE PARSER ================== */
+
+function parseMessage(text) {
+  const p = text.trim().split(" ");
+  const now = new Date().toLocaleString();
+
+  // Salary
+  if (p[0] === "salary") {
+    return [{
+      date: now,
+      amount: Number(p[1]),
+      flow: "INCOME",
+      category: "salary",
+      account: p[2],
+      description: "Salary Credit",
+      ref: "",
+      raw: text,
+    }];
   }
+
+  // Borrowed
+  if (p[0] === "borrow") {
+    return [{
+      date: now,
+      amount: Number(p[1]),
+      flow: "BORROWED",
+      category: p[4],
+      account: p[3],
+      description: `Borrowed from ${p[2]}`,
+      ref: p[2],
+      raw: text,
+    }];
+  }
+
+  // Received
+  if (p[0] === "receive") {
+    return [{
+      date: now,
+      amount: Number(p[1]),
+      flow: "RECEIVED",
+      category: p[4],
+      account: p[3],
+      description: `Received from ${p[2]}`,
+      ref: p[2],
+      raw: text,
+    }];
+  }
+
+  // Transfer
+  if (p[2] === "transfer") {
+    return [
+      {
+        date: now,
+        amount: Number(p[0]),
+        flow: "TRANSFER_OUT",
+        category: "transfer",
+        account: p[1],
+        description: `Transfer to ${p[3]}`,
+        ref: p[3],
+        raw: text,
+      },
+      {
+        date: now,
+        amount: Number(p[0]),
+        flow: "TRANSFER_IN",
+        category: "transfer",
+        account: p[3],
+        description: `Transfer from ${p[1]}`,
+        ref: p[1],
+        raw: text,
+      },
+    ];
+  }
+
+  // Normal / investment
+  return [{
+    date: now,
+    amount: Number(p[0]),
+    flow: p[p.length - 1] === "invest" ? "INVESTMENT" : "EXPENSE",
+    category: p[p.length - 1],
+    account: p[p.length - 2],
+    description: p.slice(1, -2).join(" "),
+    ref: "",
+    raw: text,
+  }];
 }
 
-startBot();
+/* ================== SINGLE MESSAGE HANDLER ================== */
 
-console.log("🚀 Expense Bot is running...");
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  if (!text) return;
 
+  // -------- COMMANDS --------
+  if (text.startsWith("/")) {
+    const rows = await getAllTransactions();
 
-const express = require("express");
+    if (text === "/help") {
+      return bot.sendMessage(chatId,
+`/today – today expense
+/month – monthly summary
+/borrowed – pending borrowed`);
+    }
+
+    if (text === "/today") {
+      let sum = 0;
+      rows.forEach(([d, a, f]) => f === "EXPENSE" && isSameDay(d) && (sum += +a));
+      return bot.sendMessage(chatId, `Today: ₹${sum}`);
+    }
+
+    if (text === "/month") {
+      let e = 0, i = 0, inv = 0;
+      rows.forEach(([d, a, f]) => {
+        if (!isSameMonth(d)) return;
+        if (f === "EXPENSE") e += +a;
+        if (f === "INCOME") i += +a;
+        if (f === "INVESTMENT") inv += +a;
+      });
+      return bot.sendMessage(chatId,
+`Expense: ₹${e}
+Income: ₹${i}
+Investment: ₹${inv}`);
+    }
+
+    if (text === "/borrowed") {
+      let b = 0, r = 0;
+      rows.forEach(([, a, f]) => {
+        if (f === "BORROWED") b += +a;
+        if (f === "RECEIVED") r += +a;
+      });
+      return bot.sendMessage(chatId, `Pending: ₹${b - r}`);
+    }
+
+    return;
+  }
+
+  // -------- LOGGING --------
+  try {
+    const entries = parseMessage(text);
+    for (const e of entries) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: process.env.SHEET_ID,
+        range: "Transactions!A:H",
+        valueInputOption: "USER_ENTERED",
+        requestBody: {
+          values: [[
+            e.date, e.amount, e.flow, e.category,
+            e.account, e.description, e.ref, e.raw
+          ]],
+        },
+      });
+    }
+    bot.sendMessage(chatId, "✅ Logged");
+  } catch (err) {
+    console.error(err);
+    bot.sendMessage(chatId, "❌ Error");
+  }
+});
+
+/* ================== SAFE POLLING START ================== */
+
+(async () => {
+  await bot.stopPolling().catch(() => {});
+  await bot.startPolling();
+  console.log("🤖 Telegram polling started safely");
+})();
+
+/* ================== EXPRESS (RENDER) ================== */
+
 const app = express();
-
-const PORT = process.env.PORT || 3000;
-
-app.get("/", (req, res) => {
-  res.send("Telegram Expense Bot is running 🚀");
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Server listening on port ${PORT}`);
-});
+app.get("/", (_, res) => res.send("Bot running"));
+app.listen(process.env.PORT || 3000, () =>
+  console.log("🌐 HTTP server ready")
+);
