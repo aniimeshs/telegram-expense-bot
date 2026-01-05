@@ -3,11 +3,14 @@ const TelegramBot = require("node-telegram-bot-api");
 const { google } = require("googleapis");
 const express = require("express");
 
-/* ================== TELEGRAM BOT ================== */
+/* ================== BASIC SETUP ================== */
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
+const app = express();
+app.use(express.json());
 
-/* ================== GOOGLE AUTH ================== */
+const bot = new TelegramBot(process.env.BOT_TOKEN);
+
+/* ================== GOOGLE SHEETS ================== */
 
 const auth = new google.auth.GoogleAuth({
   keyFile: "credentials.json",
@@ -18,6 +21,15 @@ const sheets = google.sheets({ version: "v4", auth });
 
 /* ================== HELPERS ================== */
 
+async function appendRow(row) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: process.env.SHEET_ID,
+    range: "Transactions!A:H",
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [row] },
+  });
+}
+
 async function getAllTransactions() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: process.env.SHEET_ID,
@@ -26,117 +38,72 @@ async function getAllTransactions() {
   return res.data.values || [];
 }
 
-function isSameDay(dateStr) {
-  const d = new Date(dateStr);
+function isSameDay(d) {
+  const x = new Date(d);
   const t = new Date();
   return (
-    d.getDate() === t.getDate() &&
-    d.getMonth() === t.getMonth() &&
-    d.getFullYear() === t.getFullYear()
+    x.getDate() === t.getDate() &&
+    x.getMonth() === t.getMonth() &&
+    x.getFullYear() === t.getFullYear()
   );
 }
 
-function isSameMonth(dateStr) {
-  const d = new Date(dateStr);
+function isSameMonth(d) {
+  const x = new Date(d);
   const t = new Date();
-  return d.getMonth() === t.getMonth() && d.getFullYear() === t.getFullYear();
+  return x.getMonth() === t.getMonth() && x.getFullYear() === t.getFullYear();
 }
 
-/* ================== MESSAGE PARSER ================== */
+/* ================== PARSER ================== */
 
 function parseMessage(text) {
   const p = text.trim().split(" ");
   const now = new Date().toLocaleString();
 
-  // Salary
+  // salary
   if (p[0] === "salary") {
-    return [{
-      date: now,
-      amount: Number(p[1]),
-      flow: "INCOME",
-      category: "salary",
-      account: p[2],
-      description: "Salary Credit",
-      ref: "",
-      raw: text,
-    }];
+    return [[now, p[1], "INCOME", "salary", p[2], "Salary Credit", "", text]];
   }
 
-  // Borrowed
+  // borrow
   if (p[0] === "borrow") {
-    return [{
-      date: now,
-      amount: Number(p[1]),
-      flow: "BORROWED",
-      category: p[4],
-      account: p[3],
-      description: `Borrowed from ${p[2]}`,
-      ref: p[2],
-      raw: text,
-    }];
+    return [[now, p[1], "BORROWED", p[4], p[3], `Borrowed from ${p[2]}`, p[2], text]];
   }
 
-  // Received
+  // receive
   if (p[0] === "receive") {
-    return [{
-      date: now,
-      amount: Number(p[1]),
-      flow: "RECEIVED",
-      category: p[4],
-      account: p[3],
-      description: `Received from ${p[2]}`,
-      ref: p[2],
-      raw: text,
-    }];
+    return [[now, p[1], "RECEIVED", p[4], p[3], `Received from ${p[2]}`, p[2], text]];
   }
 
-  // Transfer
+  // transfer
   if (p[2] === "transfer") {
     return [
-      {
-        date: now,
-        amount: Number(p[0]),
-        flow: "TRANSFER_OUT",
-        category: "transfer",
-        account: p[1],
-        description: `Transfer to ${p[3]}`,
-        ref: p[3],
-        raw: text,
-      },
-      {
-        date: now,
-        amount: Number(p[0]),
-        flow: "TRANSFER_IN",
-        category: "transfer",
-        account: p[3],
-        description: `Transfer from ${p[1]}`,
-        ref: p[1],
-        raw: text,
-      },
+      [now, p[0], "TRANSFER_OUT", "transfer", p[1], `Transfer to ${p[3]}`, p[3], text],
+      [now, p[0], "TRANSFER_IN", "transfer", p[3], `Transfer from ${p[1]}`, p[1], text],
     ];
   }
 
-  // Normal / investment
-  return [{
-    date: now,
-    amount: Number(p[0]),
-    flow: p[p.length - 1] === "invest" ? "INVESTMENT" : "EXPENSE",
-    category: p[p.length - 1],
-    account: p[p.length - 2],
-    description: p.slice(1, -2).join(" "),
-    ref: "",
-    raw: text,
-  }];
+  // normal / investment
+  return [[
+    now,
+    p[0],
+    p[p.length - 1] === "invest" ? "INVESTMENT" : "EXPENSE",
+    p[p.length - 1],
+    p[p.length - 2],
+    p.slice(1, -2).join(" "),
+    "",
+    text,
+  ]];
 }
 
-/* ================== SINGLE MESSAGE HANDLER ================== */
+/* ================== MESSAGE HANDLER ================== */
 
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
   if (!text) return;
 
-  // -------- COMMANDS --------
+  // ----- COMMANDS -----
   if (text.startsWith("/")) {
     const rows = await getAllTransactions();
 
@@ -150,7 +117,7 @@ bot.on("message", async (msg) => {
     if (text === "/today") {
       let sum = 0;
       rows.forEach(([d, a, f]) => f === "EXPENSE" && isSameDay(d) && (sum += +a));
-      return bot.sendMessage(chatId, `Today: ₹${sum}`);
+      return bot.sendMessage(chatId, `Today Expense: ₹${sum}`);
     }
 
     if (text === "/month") {
@@ -162,7 +129,8 @@ bot.on("message", async (msg) => {
         if (f === "INVESTMENT") inv += +a;
       });
       return bot.sendMessage(chatId,
-`Expense: ₹${e}
+`This Month
+Expense: ₹${e}
 Income: ₹${i}
 Investment: ₹${inv}`);
     }
@@ -173,47 +141,37 @@ Investment: ₹${inv}`);
         if (f === "BORROWED") b += +a;
         if (f === "RECEIVED") r += +a;
       });
-      return bot.sendMessage(chatId, `Pending: ₹${b - r}`);
+      return bot.sendMessage(chatId, `Pending Borrowed: ₹${b - r}`);
     }
 
     return;
   }
 
-  // -------- LOGGING --------
+  // ----- LOGGING -----
   try {
-    const entries = parseMessage(text);
-    for (const e of entries) {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: process.env.SHEET_ID,
-        range: "Transactions!A:H",
-        valueInputOption: "USER_ENTERED",
-        requestBody: {
-          values: [[
-            e.date, e.amount, e.flow, e.category,
-            e.account, e.description, e.ref, e.raw
-          ]],
-        },
-      });
-    }
+    const rows = parseMessage(text);
+    for (const r of rows) await appendRow(r);
     bot.sendMessage(chatId, "✅ Logged");
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(chatId, "❌ Error");
+  } catch (e) {
+    console.error(e);
+    bot.sendMessage(chatId, "❌ Error logging entry");
   }
 });
 
-/* ================== SAFE POLLING START ================== */
+/* ================== WEBHOOK ================== */
 
-(async () => {
-  await bot.stopPolling().catch(() => {});
-  await bot.startPolling();
-  console.log("🤖 Telegram polling started safely");
-})();
+app.post("/telegram-webhook", (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
 
-/* ================== EXPRESS (RENDER) ================== */
+app.get("/", (_, res) => res.send("Telegram Expense Bot running 🚀"));
 
-const app = express();
-app.get("/", (_, res) => res.send("Bot running"));
-app.listen(process.env.PORT || 3000, () =>
-  console.log("🌐 HTTP server ready")
-);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, async () => {
+  console.log("🌐 Server running on port", PORT);
+
+  const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/telegram-webhook`;
+  await bot.setWebHook(webhookUrl);
+  console.log("🔗 Webhook set:", webhookUrl);
+});
